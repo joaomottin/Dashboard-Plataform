@@ -1,20 +1,5 @@
 import { Grid, Box } from '@mui/material';
-import {
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  AreaChart,
-  Area,
-  PieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
+import {BarChart, Bar, LineChart, Line, AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import { StatCard, ChartCard } from '../components/Cards';
 import { ShowChart, People, AttachMoney, TrendingUp } from '@mui/icons-material';
