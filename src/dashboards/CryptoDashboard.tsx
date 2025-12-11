@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Grid, Box, CircularProgress, Typography, IconButton, ToggleButtonGroup, ToggleButton } from '@mui/material';
+import { useState, useEffect, useRef } from 'react';
+import { Grid, Box, CircularProgress, Typography, IconButton } from '@mui/material';
 import {
   AreaChart,
   Area,
@@ -40,27 +40,91 @@ export const CryptoDashboard = () => {
   const [cryptoData, setCryptoData] = useState<CryptoData[]>([]);
   const [bitcoinHistory, setBitcoinHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [days, setDays] = useState<string>('7');
   const [usdToBrl, setUsdToBrl] = useState<number>(5.0);
+  const [selectedCryptoId, setSelectedCryptoId] = useState('bitcoin');
+  const [selectedCrypto, setSelectedCrypto] = useState({ id: 'bitcoin', name: 'Bitcoin', symbol: 'BTC' });
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const fetchCryptoData = async () => {
+    // Cancelar requisição anterior se existir
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Criar novo controller para esta requisição
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     setLoading(true);
     try {
-      // Buscar taxa de câmbio USD para BRL
-      const exchangeResponse = await axios.get(
-        'https://api.coingecko.com/api/v3/simple/price',
-        {
-          params: {
-            ids: 'usd',
-            vs_currencies: 'brl',
-          },
-        }
-      );
+      // Buscar apenas o histórico da criptomoeda (mais rápido)
+      const [historyResponse, exchangeResponse] = await Promise.all([
+        axios.get<MarketChartData>(
+          `https://api.coingecko.com/api/v3/coins/${selectedCryptoId}/market_chart`,
+          {
+            params: {
+              vs_currency: 'usd',
+              days: 30,
+            },
+            signal: abortController.signal,
+          }
+        ),
+        axios.get(
+          'https://api.coingecko.com/api/v3/simple/price',
+          {
+            params: {
+              ids: 'usd',
+              vs_currencies: 'brl',
+            },
+            signal: abortController.signal,
+          }
+        ),
+      ]);
+
+      // Se foi cancelado, não processar
+      if (abortController.signal.aborted) return;
+
       const currentRate = exchangeResponse.data.usd?.brl || 5.0;
       setUsdToBrl(currentRate);
 
-      // Buscar top 10 criptomoedas
-      const response = await axios.get(
+      // Processar dados do histórico
+      const totalPoints = historyResponse.data.prices.length;
+      const maxPoints = 50;
+      const sampleRate = Math.max(1, Math.floor(totalPoints / maxPoints));
+      
+      const processedHistory = historyResponse.data.prices
+        .filter((_, index) => index % sampleRate === 0)
+        .map((item) => {
+          const date = new Date(item[0]);
+          
+          return {
+            date: date.toLocaleDateString('pt-BR', {
+              month: 'short',
+              day: 'numeric',
+            }),
+            price: Math.round(item[1] * currentRate),
+          };
+        });
+
+      setBitcoinHistory(processedHistory);
+    } catch (error: any) {
+      if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
+        // Ignorar erros de cancelamento
+        return;
+      }
+      console.error('Erro ao buscar dados:', error);
+    } finally {
+      if (!abortController.signal.aborted) {
+        setLoading(false);
+      }
+    }
+  };
+
+  // Buscar dados das criptomoedas apenas uma vez
+  useEffect(() => {
+    const fetchMarketData = async () => {
+      try {
+        const response = await axios.get(
           'https://api.coingecko.com/api/v3/coins/markets',
           {
             params: {
@@ -72,51 +136,26 @@ export const CryptoDashboard = () => {
             },
           }
         );
-      setCryptoData(response.data);
-
-      // Buscar histórico do Bitcoin
-      const historyResponse = await axios.get<MarketChartData>(
-        'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
-        {
-          params: {
-            vs_currency: 'usd',
-            days: parseInt(days),
-          },
-        }
-      );
-
-      // Processar dados do histórico para o gráfico
-      const totalPoints = historyResponse.data.prices.length;
-      const maxPoints = 50;
-      const sampleRate = Math.max(1, Math.floor(totalPoints / maxPoints));
-      
-      const processedHistory = historyResponse.data.prices
-        .filter((_, index) => index % sampleRate === 0)
-        .map((item) => {
-          const date = new Date(item[0]);
-          const daysNum = parseInt(days);
-          
-          return {
-            date: date.toLocaleDateString('pt-BR', {
-              month: 'short',
-              day: 'numeric',
-              hour: daysNum === 1 ? '2-digit' : undefined,
-            }),
-            price: Math.round(item[1] * currentRate),
-          };
-        });
-
-      setBitcoinHistory(processedHistory);
-    } catch (error) {
-      console.error('Erro ao buscar dados:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+        setCryptoData(response.data);
+      } catch (error) {
+        console.error('Erro ao buscar market data:', error);
+      }
+    };
+    fetchMarketData();
+  }, []);
 
   useEffect(() => {
+    console.log('Mudou para:', selectedCryptoId);
     fetchCryptoData();
-  }, [days]);
+    
+    // Cleanup: cancelar requisição ao desmontar
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCryptoId]);
 
   if (loading && cryptoData.length === 0) {
     return (
@@ -161,72 +200,71 @@ export const CryptoDashboard = () => {
         <Typography variant="h4" sx={{ fontWeight: 700 }}>
           Criptomoedas ao Vivo
         </Typography>
-        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-          <ToggleButtonGroup
-            value={days}
-            exclusive
-            onChange={(_, newValue) => newValue && setDays(newValue)}
-            size="small"
-            sx={{
-              '& .MuiToggleButton-root': {
-                color: 'text.secondary',
-                borderColor: 'rgba(255,255,255,0.12)',
-                '&.Mui-selected': {
-                  backgroundColor: theme.palette.primary.main,
-                  color: 'white',
-                  '&:hover': {
-                    backgroundColor: theme.palette.primary.dark,
-                  },
-                },
-              },
-            }}
-          >
-            <ToggleButton value="1">1D</ToggleButton>
-            <ToggleButton value="7">7D</ToggleButton>
-            <ToggleButton value="30">30D</ToggleButton>
-          </ToggleButtonGroup>
-          <IconButton
-            onClick={fetchCryptoData}
-            sx={{
-              color: theme.palette.primary.main,
-              '&:hover': { transform: 'rotate(180deg)', transition: 'transform 0.5s' },
-            }}
-          >
-            <Refresh />
-          </IconButton>
-        </Box>
+        <IconButton
+          onClick={fetchCryptoData}
+          sx={{
+            color: theme.palette.primary.main,
+            '&:hover': { transform: 'rotate(180deg)', transition: 'transform 0.5s' },
+          }}
+        >
+          <Refresh />
+        </IconButton>
       </Box>
 
       <Grid container spacing={3}>
         {/* Stats Cards com dados reais */}
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Bitcoin (BTC)"
-            value={`R$ ${(topCrypto?.current_price * usdToBrl).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`}
-            change={topCrypto?.price_change_percentage_24h}
-            icon={<CurrencyBitcoin sx={{ fontSize: 40 }} />}
-            color={theme.palette.primary.main}
-          />
+        <Grid item xs={12} sm={6} md={4}>
+          <Box 
+            onClick={() => {
+              setSelectedCryptoId('bitcoin');
+              setSelectedCrypto({ id: 'bitcoin', name: 'Bitcoin', symbol: 'BTC' });
+            }}
+            sx={{ 
+              cursor: 'pointer', 
+              transition: 'transform 0.2s',
+              '&:hover': { transform: 'scale(1.02)' },
+              opacity: selectedCryptoId === 'bitcoin' ? 1 : 0.7,
+              border: selectedCryptoId === 'bitcoin' ? `2px solid ${theme.palette.primary.main}` : 'none',
+              borderRadius: '12px',
+              pointerEvents: 'auto',
+            }}
+          >
+            <StatCard
+              title="Bitcoin (BTC)"
+              value={`R$ ${(topCrypto?.current_price * usdToBrl).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`}
+              change={topCrypto?.price_change_percentage_24h}
+              icon={<CurrencyBitcoin sx={{ fontSize: 40 }} />}
+              color={theme.palette.primary.main}
+            />
+          </Box>
         </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title={cryptoData[1]?.name || 'Ethereum'}
-            value={`R$ ${(cryptoData[1]?.current_price * usdToBrl).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`}
-            change={cryptoData[1]?.price_change_percentage_24h}
-            icon={<ShowChart sx={{ fontSize: 40 }} />}
-            color={theme.palette.secondary.main}
-          />
+        <Grid item xs={12} sm={6} md={4}>
+          <Box 
+            onClick={() => {
+              const ethId = cryptoData[1]?.id || 'ethereum';
+              setSelectedCryptoId(ethId);
+              setSelectedCrypto({ id: ethId, name: cryptoData[1]?.name || 'Ethereum', symbol: cryptoData[1]?.symbol.toUpperCase() || 'ETH' });
+            }}
+            sx={{ 
+              cursor: 'pointer', 
+              transition: 'transform 0.2s',
+              '&:hover': { transform: 'scale(1.02)' },
+              opacity: selectedCryptoId === (cryptoData[1]?.id || 'ethereum') ? 1 : 0.7,
+              border: selectedCryptoId === (cryptoData[1]?.id || 'ethereum') ? `2px solid ${theme.palette.secondary.main}` : 'none',
+              borderRadius: '12px',
+              pointerEvents: 'auto',
+            }}
+          >
+            <StatCard
+              title={cryptoData[1]?.name || 'Ethereum'}
+              value={`R$ ${(cryptoData[1]?.current_price * usdToBrl).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`}
+              change={cryptoData[1]?.price_change_percentage_24h}
+              icon={<ShowChart sx={{ fontSize: 40 }} />}
+              color={theme.palette.secondary.main}
+            />
+          </Box>
         </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title={cryptoData[2]?.name || 'Tether'}
-            value={`R$ ${(cryptoData[2]?.current_price * usdToBrl).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}`}
-            change={cryptoData[2]?.price_change_percentage_24h}
-            icon={<TrendingUp sx={{ fontSize: 40 }} />}
-            color={theme.palette.info.main}
-          />
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid item xs={12} sm={6} md={4}>
           <StatCard
             title="Market Cap Total"
             value={`R$ ${((cryptoData.reduce((sum, c) => sum + c.market_cap, 0) * usdToBrl) / 1000000000000).toFixed(2)}T`}
@@ -241,7 +279,7 @@ export const CryptoDashboard = () => {
 
         {/* Gráfico de histórico do Bitcoin (dados reais) */}
         <Grid item xs={12} lg={8}>
-          <ChartCard title={`Bitcoin - ${days === '1' ? '24 Horas' : days === '7' ? '7 Dias' : '30 Dias'}`}>
+          <ChartCard title={`${selectedCrypto.name} (${selectedCrypto.symbol}) - Últimos 30 Dias`}>
             <ResponsiveContainer width="100%" height={350}>
               <AreaChart data={bitcoinHistory}>
                 <defs>
